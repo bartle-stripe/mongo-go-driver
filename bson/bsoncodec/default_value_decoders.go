@@ -1000,25 +1000,35 @@ func (dvd DefaultValueDecoders) ArrayDecodeValue(dc DecodeContext, vr bsonrw.Val
 		return fmt.Errorf("cannot decode %v into an array", vrType)
 	}
 
-	var elemsFunc func(DecodeContext, bsonrw.ValueReader, reflect.Value) ([]reflect.Value, error)
 	switch val.Type().Elem() {
 	case tE:
-		elemsFunc = dvd.decodeD
+		elems, err := dvd.appendD(dc, vr, nil)
+
+		if err != nil {
+			return err
+		}
+
+		if len(elems) > val.Len() {
+			return fmt.Errorf("more elements returned in array than can fit inside %s, got %v elements", val.Type(), len(elems))
+		}
+
+		for idx := 0; idx < len(elems); idx++ {
+			val.Index(idx).Set(reflect.ValueOf(elems[idx]))
+		}
 	default:
-		elemsFunc = dvd.decodeDefault
-	}
+		elems, err := dvd.appendDefault(dc, vr, reflect.Zero(val.Type()))
 
-	elems, err := elemsFunc(dc, vr, val)
-	if err != nil {
-		return err
-	}
+		if err != nil {
+			return err
+		}
 
-	if len(elems) > val.Len() {
-		return fmt.Errorf("more elements returned in array than can fit inside %s, got %v elements", val.Type(), len(elems))
-	}
+		if elems.Len() > val.Len() {
+			return fmt.Errorf("more elements returned in array than can fit inside %s, got %v elements", val.Type(), elems.Len())
+		}
 
-	for idx, elem := range elems {
-		val.Index(idx).Set(elem)
+		for idx := 0; idx < elems.Len(); idx++ {
+			val.Index(idx).Set(elems.Index(idx))
+		}
 	}
 
 	return nil
@@ -1045,26 +1055,25 @@ func (dvd DefaultValueDecoders) SliceDecodeValue(dc DecodeContext, vr bsonrw.Val
 		return fmt.Errorf("cannot decode %v into a slice", vr.Type())
 	}
 
-	var elemsFunc func(DecodeContext, bsonrw.ValueReader, reflect.Value) ([]reflect.Value, error)
+	if !val.IsNil() {
+		val.SetLen(0)
+	}
+
 	switch val.Type().Elem() {
 	case tE:
 		dc.Ancestor = val.Type()
-		elemsFunc = dvd.decodeD
+		elems, err := dvd.appendD(dc, vr, val.Interface().(primitive.D))
+		if err != nil {
+			return err
+		}
+		val.Set(reflect.ValueOf(elems))
 	default:
-		elemsFunc = dvd.decodeDefault
+		elems, err := dvd.appendDefault(dc, vr, val)
+		if err != nil {
+			return err
+		}
+		val.Set(elems)
 	}
-
-	elems, err := elemsFunc(dc, vr, val)
-	if err != nil {
-		return err
-	}
-
-	if val.IsNil() {
-		val.Set(reflect.MakeSlice(val.Type(), 0, len(elems)))
-	}
-
-	val.SetLen(0)
-	val.Set(reflect.Append(val, elems...))
 
 	return nil
 }
@@ -1192,19 +1201,17 @@ func (DefaultValueDecoders) CoreDocumentDecodeValue(dc DecodeContext, vr bsonrw.
 	return err
 }
 
-func (dvd DefaultValueDecoders) decodeDefault(dc DecodeContext, vr bsonrw.ValueReader, val reflect.Value) ([]reflect.Value, error) {
-	elems := make([]reflect.Value, 0)
-
+func (dvd DefaultValueDecoders) appendDefault(dc DecodeContext, vr bsonrw.ValueReader, val reflect.Value) (reflect.Value, error) {
 	ar, err := vr.ReadArray()
 	if err != nil {
-		return nil, err
+		return reflect.Value{}, err
 	}
 
 	eType := val.Type().Elem()
 
 	decoder, err := dc.LookupDecoder(eType)
 	if err != nil {
-		return nil, err
+		return reflect.Value{}, err
 	}
 
 	idx := 0
@@ -1214,20 +1221,20 @@ func (dvd DefaultValueDecoders) decodeDefault(dc DecodeContext, vr bsonrw.ValueR
 			break
 		}
 		if err != nil {
-			return nil, err
+			return reflect.Value{}, err
 		}
 
 		elem := reflect.New(eType).Elem()
 
 		err = decoder.DecodeValue(dc, vr, elem)
 		if err != nil {
-			return nil, newDecodeError(strconv.Itoa(idx), err)
+			return reflect.Value{}, newDecodeError(strconv.Itoa(idx), err)
 		}
-		elems = append(elems, elem)
+		val = reflect.Append(val, elem)
 		idx++
 	}
 
-	return elems, nil
+	return val, nil
 }
 
 // CodeWithScopeDecodeValue is the ValueDecoderFunc for CodeWithScope.
@@ -1243,18 +1250,14 @@ func (dvd DefaultValueDecoders) CodeWithScopeDecodeValue(dc DecodeContext, vr bs
 			return err
 		}
 
-		scope := reflect.New(tD).Elem()
-		elems, err := dvd.decodeElemsFromDocumentReader(dc, dr)
+		scope, err := dvd.appendElemsFromDocumentReader(dc, dr, nil)
 		if err != nil {
 			return err
 		}
 
-		scope.Set(reflect.MakeSlice(tD, 0, len(elems)))
-		scope.Set(reflect.Append(scope, elems...))
-
 		val.Set(reflect.ValueOf(primitive.CodeWithScope{
 			Code:  primitive.JavaScript(code),
-			Scope: scope.Interface().(primitive.D),
+			Scope: scope,
 		}))
 		return nil
 	case bsontype.Null:
@@ -1274,7 +1277,7 @@ func (dvd DefaultValueDecoders) CodeWithScopeDecodeValue(dc DecodeContext, vr bs
 	}
 }
 
-func (dvd DefaultValueDecoders) decodeD(dc DecodeContext, vr bsonrw.ValueReader, _ reflect.Value) ([]reflect.Value, error) {
+func (dvd DefaultValueDecoders) appendD(dc DecodeContext, vr bsonrw.ValueReader, val primitive.D) (primitive.D, error) {
 	switch vr.Type() {
 	case bsontype.Type(0), bsontype.EmbeddedDocument:
 	default:
@@ -1286,16 +1289,15 @@ func (dvd DefaultValueDecoders) decodeD(dc DecodeContext, vr bsonrw.ValueReader,
 		return nil, err
 	}
 
-	return dvd.decodeElemsFromDocumentReader(dc, dr)
+	return dvd.appendElemsFromDocumentReader(dc, dr, val)
 }
 
-func (DefaultValueDecoders) decodeElemsFromDocumentReader(dc DecodeContext, dr bsonrw.DocumentReader) ([]reflect.Value, error) {
+func (DefaultValueDecoders) appendElemsFromDocumentReader(dc DecodeContext, dr bsonrw.DocumentReader, val primitive.D) (primitive.D, error) {
 	decoder, err := dc.LookupDecoder(tEmpty)
 	if err != nil {
 		return nil, err
 	}
 
-	elems := make([]reflect.Value, 0)
 	for {
 		key, vr, err := dr.ReadElement()
 		if err == bsonrw.ErrEOD {
@@ -1305,14 +1307,14 @@ func (DefaultValueDecoders) decodeElemsFromDocumentReader(dc DecodeContext, dr b
 			return nil, err
 		}
 
-		val := reflect.New(tEmpty).Elem()
-		err = decoder.DecodeValue(dc, vr, val)
+		elem := reflect.New(tEmpty).Elem()
+		err = decoder.DecodeValue(dc, vr, elem)
 		if err != nil {
 			return nil, newDecodeError(key, err)
 		}
 
-		elems = append(elems, reflect.ValueOf(primitive.E{Key: key, Value: val.Interface()}))
+		val = append(val, primitive.E{Key: key, Value: elem.Interface()})
 	}
 
-	return elems, nil
+	return val, nil
 }

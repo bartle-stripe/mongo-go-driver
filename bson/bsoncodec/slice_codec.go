@@ -174,26 +174,25 @@ func (sc *SliceCodec) DecodeValue(dc DecodeContext, vr bsonrw.ValueReader, val r
 		return fmt.Errorf("cannot decode %v into a slice", vrType)
 	}
 
-	var elemsFunc func(DecodeContext, bsonrw.ValueReader, reflect.Value) ([]reflect.Value, error)
+	if !val.IsNil() {
+		val.SetLen(0)
+	}
+
 	switch val.Type().Elem() {
 	case tE:
 		dc.Ancestor = val.Type()
-		elemsFunc = defaultValueDecoders.decodeD
+		elems, err := defaultValueDecoders.appendD(dc, vr, val.Interface().(primitive.D))
+		if err != nil {
+			return err
+		}
+		val.Set(reflect.ValueOf(elems))
 	default:
-		elemsFunc = defaultValueDecoders.decodeDefault
+		elems, err := defaultValueDecoders.appendDefault(dc, vr, val)
+		if err != nil {
+			return err
+		}
+		val.Set(elems)
 	}
-
-	elems, err := elemsFunc(dc, vr, val)
-	if err != nil {
-		return err
-	}
-
-	if val.IsNil() {
-		val.Set(reflect.MakeSlice(val.Type(), 0, len(elems)))
-	}
-
-	val.SetLen(0)
-	val.Set(reflect.Append(val, elems...))
 
 	return nil
 }
