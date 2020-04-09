@@ -62,11 +62,11 @@ func (dvd DefaultValueDecoders) RegisterDefaultDecoders(rb *RegistryBuilder) {
 		RegisterTypeDecoder(tCoreDocument, ValueDecoderFunc(dvd.CoreDocumentDecodeValue)).
 		RegisterTypeDecoder(tCodeWithScope, ValueDecoderFunc(dvd.CodeWithScopeDecodeValue)).
 		RegisterDefaultDecoder(reflect.Bool, ValueDecoderFunc(dvd.BooleanDecodeValue)).
-		RegisterDefaultDecoder(reflect.Int, ValueDecoderFunc(dvd.IntDecodeValue)).
-		RegisterDefaultDecoder(reflect.Int8, ValueDecoderFunc(dvd.IntDecodeValue)).
-		RegisterDefaultDecoder(reflect.Int16, ValueDecoderFunc(dvd.IntDecodeValue)).
-		RegisterDefaultDecoder(reflect.Int32, ValueDecoderFunc(dvd.IntDecodeValue)).
-		RegisterDefaultDecoder(reflect.Int64, ValueDecoderFunc(dvd.IntDecodeValue)).
+		RegisterDefaultDecoder(reflect.Int, ValueTypeDecoderFunc{dvd.IntDecodeValue, dvd.IntDecodeType}).
+		RegisterDefaultDecoder(reflect.Int8, ValueTypeDecoderFunc{dvd.IntDecodeValue, dvd.IntDecodeType}).
+		RegisterDefaultDecoder(reflect.Int16, ValueTypeDecoderFunc{dvd.IntDecodeValue, dvd.IntDecodeType}).
+		RegisterDefaultDecoder(reflect.Int32, ValueTypeDecoderFunc{dvd.IntDecodeValue, dvd.IntDecodeType}).
+		RegisterDefaultDecoder(reflect.Int64, ValueTypeDecoderFunc{dvd.IntDecodeValue, dvd.IntDecodeType}).
 		RegisterDefaultDecoder(reflect.Uint, defaultUIntCodec).
 		RegisterDefaultDecoder(reflect.Uint8, defaultUIntCodec).
 		RegisterDefaultDecoder(reflect.Uint16, defaultUIntCodec).
@@ -130,6 +130,7 @@ func (dvd DefaultValueDecoders) DDecodeValue(dctx DecodeContext, vr bsonrw.Value
 	if err != nil {
 		return err
 	}
+	typeDecoder, _ := decoder.(TypeDecoder)
 
 	var elems primitive.D
 	if !val.IsNil() {
@@ -147,8 +148,13 @@ func (dvd DefaultValueDecoders) DDecodeValue(dctx DecodeContext, vr bsonrw.Value
 			return err
 		}
 
-		elem := reflect.New(tEmpty).Elem()
-		err = decoder.DecodeValue(dctx, evr, elem)
+		var elem reflect.Value
+		if typeDecoder != nil {
+			elem, err = typeDecoder.DecodeType(dctx, evr, tEmpty)
+		} else {
+			elem = reflect.New(tEmpty).Elem()
+			err = decoder.DecodeValue(dctx, evr, elem)
+		}
 		if err != nil {
 			return err
 		}
@@ -207,6 +213,83 @@ func (dvd DefaultValueDecoders) BooleanDecodeValue(dctx DecodeContext, vr bsonrw
 	return nil
 }
 
+// IntDecodeType is the TypeDecoderFunc for int types.
+func (dvd DefaultValueDecoders) IntDecodeType(dc DecodeContext, vr bsonrw.ValueReader, t reflect.Type) (reflect.Value, error) {
+	var i64 int64
+	var err error
+	switch vrType := vr.Type(); vrType {
+	case bsontype.Int32:
+		i32, err := vr.ReadInt32()
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		i64 = int64(i32)
+	case bsontype.Int64:
+		i64, err = vr.ReadInt64()
+		if err != nil {
+			return reflect.Value{}, err
+		}
+	case bsontype.Double:
+		f64, err := vr.ReadDouble()
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if !dc.Truncate && math.Floor(f64) != f64 {
+			return reflect.Value{}, errors.New("IntDecodeValue can only truncate float64 to an integer type when truncation is enabled")
+		}
+		if f64 > float64(math.MaxInt64) {
+			return reflect.Value{}, fmt.Errorf("%g overflows int64", f64)
+		}
+		i64 = int64(f64)
+	case bsontype.Boolean:
+		b, err := vr.ReadBoolean()
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if b {
+			i64 = 1
+		}
+	case bsontype.Null:
+		if err = vr.ReadNull(); err != nil {
+			return reflect.Value{}, err
+		}
+	case bsontype.Undefined:
+		if err = vr.ReadUndefined(); err != nil {
+			return reflect.Value{}, err
+		}
+	default:
+		return reflect.Value{}, fmt.Errorf("cannot decode %v into an integer type", vrType)
+	}
+
+	switch t.Kind() {
+	case reflect.Int8:
+		if i64 < math.MinInt8 || i64 > math.MaxInt8 {
+			return reflect.Value{}, fmt.Errorf("%d overflows int8", i64)
+		}
+	case reflect.Int16:
+		if i64 < math.MinInt16 || i64 > math.MaxInt16 {
+			return reflect.Value{}, fmt.Errorf("%d overflows int16", i64)
+		}
+	case reflect.Int32:
+		if i64 < math.MinInt32 || i64 > math.MaxInt32 {
+			return reflect.Value{}, fmt.Errorf("%d overflows int32", i64)
+		}
+	case reflect.Int64:
+	case reflect.Int:
+		if int64(int(i64)) != i64 { // Can we fit this inside of an int
+			return reflect.Value{}, fmt.Errorf("%d overflows int", i64)
+		}
+	default:
+		return reflect.Value{}, ValueDecoderError{
+			Name:     "IntDecodeValue",
+			Kinds:    []reflect.Kind{reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Int},
+			Received: reflect.Zero(t),
+		}
+	}
+
+	return reflect.ValueOf(i64), nil
+}
+
 // IntDecodeValue is the ValueDecoderFunc for int types.
 func (dvd DefaultValueDecoders) IntDecodeValue(dc DecodeContext, vr bsonrw.ValueReader, val reflect.Value) error {
 	if !val.CanSet() {
@@ -217,79 +300,12 @@ func (dvd DefaultValueDecoders) IntDecodeValue(dc DecodeContext, vr bsonrw.Value
 		}
 	}
 
-	var i64 int64
-	var err error
-	switch vrType := vr.Type(); vrType {
-	case bsontype.Int32:
-		i32, err := vr.ReadInt32()
-		if err != nil {
-			return err
-		}
-		i64 = int64(i32)
-	case bsontype.Int64:
-		i64, err = vr.ReadInt64()
-		if err != nil {
-			return err
-		}
-	case bsontype.Double:
-		f64, err := vr.ReadDouble()
-		if err != nil {
-			return err
-		}
-		if !dc.Truncate && math.Floor(f64) != f64 {
-			return errors.New("IntDecodeValue can only truncate float64 to an integer type when truncation is enabled")
-		}
-		if f64 > float64(math.MaxInt64) {
-			return fmt.Errorf("%g overflows int64", f64)
-		}
-		i64 = int64(f64)
-	case bsontype.Boolean:
-		b, err := vr.ReadBoolean()
-		if err != nil {
-			return err
-		}
-		if b {
-			i64 = 1
-		}
-	case bsontype.Null:
-		if err = vr.ReadNull(); err != nil {
-			return err
-		}
-	case bsontype.Undefined:
-		if err = vr.ReadUndefined(); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("cannot decode %v into an integer type", vrType)
+	elem, err := dvd.IntDecodeType(dc, vr, val.Type())
+	if err != nil {
+		return err
 	}
 
-	switch val.Kind() {
-	case reflect.Int8:
-		if i64 < math.MinInt8 || i64 > math.MaxInt8 {
-			return fmt.Errorf("%d overflows int8", i64)
-		}
-	case reflect.Int16:
-		if i64 < math.MinInt16 || i64 > math.MaxInt16 {
-			return fmt.Errorf("%d overflows int16", i64)
-		}
-	case reflect.Int32:
-		if i64 < math.MinInt32 || i64 > math.MaxInt32 {
-			return fmt.Errorf("%d overflows int32", i64)
-		}
-	case reflect.Int64:
-	case reflect.Int:
-		if int64(int(i64)) != i64 { // Can we fit this inside of an int
-			return fmt.Errorf("%d overflows int", i64)
-		}
-	default:
-		return ValueDecoderError{
-			Name:     "IntDecodeValue",
-			Kinds:    []reflect.Kind{reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Int},
-			Received: val,
-		}
-	}
-
-	val.SetInt(i64)
+	val.SetInt(elem.Int())
 	return nil
 }
 

@@ -142,7 +142,8 @@ func (fn ValueEncoderFunc) EncodeValue(ec EncodeContext, vw bsonrw.ValueWriter, 
 	return fn(ec, vw, val)
 }
 
-// ValueDecoder is the interface implemented by types that can handle the decoding of a value.
+// ValueDecoder is the interface implemented by types that can handle the decoding of a value
+// by setting the passed-in value.
 type ValueDecoder interface {
 	DecodeValue(DecodeContext, bsonrw.ValueReader, reflect.Value) error
 }
@@ -154,6 +155,51 @@ type ValueDecoderFunc func(DecodeContext, bsonrw.ValueReader, reflect.Value) err
 // DecodeValue implements the ValueDecoder interface.
 func (fn ValueDecoderFunc) DecodeValue(dc DecodeContext, vr bsonrw.ValueReader, val reflect.Value) error {
 	return fn(dc, vr, val)
+}
+
+// TypeDecoder is the interface implemented by types that can handle the decoding of a value by
+// returning a new value.
+type TypeDecoder interface {
+	DecodeType(DecodeContext, bsonrw.ValueReader, reflect.Type) (reflect.Value, error)
+}
+
+// ValueTypeDecoder is the interface implemented by types that implement both ValueDecoder and
+// TypeDecoder.
+type ValueTypeDecoder interface {
+	ValueDecoder
+	TypeDecoder
+}
+
+// TypeDecoderFunc is an adapter function that allows a function with the correct signature to be
+// used as a TypeDecoder.
+type TypeDecoderFunc func(DecodeContext, bsonrw.ValueReader, reflect.Type) (reflect.Value, error)
+
+// ValueTypeDecoderFunc is an adapter struct that allows two functions with the correct signature
+// to be used as a ValueTypeDecoder.
+type ValueTypeDecoderFunc struct {
+	ValueDecoderFunc
+	TypeDecoderFunc
+}
+
+// DecodeValue implements the ValueDecoder interface.
+func (fn ValueTypeDecoderFunc) DecodeValue(dc DecodeContext, vr bsonrw.ValueReader, val reflect.Value) error {
+	return fn.ValueDecoderFunc(dc, vr, val)
+}
+
+// DecodeType implements the TypeDecoder interface.
+func (fn ValueTypeDecoderFunc) DecodeType(dc DecodeContext, vr bsonrw.ValueReader, t reflect.Type) (reflect.Value, error) {
+	return fn.TypeDecoderFunc(dc, vr, t)
+}
+
+// DecodeTypeOrValue calls DecodeType, if available, or DecodeValue if not.
+func DecodeTypeOrValue(decoder ValueDecoder, dc DecodeContext, vr bsonrw.ValueReader, t reflect.Type) (reflect.Value, error) {
+	if typeDecoder, ok := decoder.(TypeDecoder); ok {
+		return typeDecoder.DecodeType(dc, vr, t)
+	} else {
+		val := reflect.New(t).Elem()
+		err := decoder.DecodeValue(dc, vr, val)
+		return val, err
+	}
 }
 
 // CodecZeroer is the interface implemented by Codecs that can also determine if
