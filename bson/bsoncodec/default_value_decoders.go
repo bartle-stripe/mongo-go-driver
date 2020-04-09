@@ -40,6 +40,7 @@ func (dvd DefaultValueDecoders) RegisterDefaultDecoders(rb *RegistryBuilder) {
 	}
 
 	rb.
+		RegisterTypeDecoder(tD, ValueDecoderFunc(dvd.DDecodeValue)).
 		RegisterTypeDecoder(tBinary, ValueDecoderFunc(dvd.BinaryDecodeValue)).
 		RegisterTypeDecoder(tUndefined, ValueDecoderFunc(dvd.UndefinedDecodeValue)).
 		RegisterTypeDecoder(tDateTime, ValueDecoderFunc(dvd.DateTimeDecodeValue)).
@@ -102,6 +103,61 @@ func (dvd DefaultValueDecoders) RegisterDefaultDecoders(rb *RegistryBuilder) {
 		RegisterTypeMapEntry(bsontype.EmbeddedDocument, tD).
 		RegisterHookDecoder(tValueUnmarshaler, ValueDecoderFunc(dvd.ValueUnmarshalerDecodeValue)).
 		RegisterHookDecoder(tUnmarshaler, ValueDecoderFunc(dvd.UnmarshalerDecodeValue))
+}
+
+func (dvd DefaultValueDecoders) DDecodeValue(dctx DecodeContext, vr bsonrw.ValueReader, val reflect.Value) error {
+	if !val.IsValid() || !val.CanSet() || val.Type() != tD {
+		return ValueDecoderError{Name: "DDecodeValue", Kinds: []reflect.Kind{reflect.Slice}, Received: val}
+	}
+
+	switch vrType := vr.Type(); vrType {
+	case bsontype.Type(0), bsontype.EmbeddedDocument:
+	case bsontype.Null:
+		val.Set(reflect.Zero(val.Type()))
+		return vr.ReadNull()
+	default:
+		return fmt.Errorf("cannot decode %v into a primitive.D", vrType)
+	}
+
+	dctx.Ancestor = tD
+
+	dr, err := vr.ReadDocument()
+	if err != nil {
+		return err
+	}
+
+	decoder, err := dctx.LookupDecoder(tEmpty)
+	if err != nil {
+		return err
+	}
+
+	var elems primitive.D
+	if !val.IsNil() {
+		val.SetLen(0)
+		elems = val.Interface().(primitive.D)
+	} else {
+		elems = make(primitive.D, 0)
+	}
+
+	for {
+		key, evr, err := dr.ReadElement()
+		if err == bsonrw.ErrEOD {
+			break
+		} else if err != nil {
+			return err
+		}
+
+		elem := reflect.New(tEmpty).Elem()
+		err = decoder.DecodeValue(dctx, evr, elem)
+		if err != nil {
+			return err
+		}
+
+		elems = append(elems, primitive.E{Key: key, Value: elem.Interface()})
+	}
+
+	val.Set(reflect.ValueOf(elems))
+	return nil
 }
 
 // BooleanDecodeValue is the ValueDecoderFunc for bool types.

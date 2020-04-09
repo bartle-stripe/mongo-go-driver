@@ -122,13 +122,35 @@ var nestedInstance = nestedtest1{
 }
 
 func BenchmarkEncoding(b *testing.B) {
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_, _ = Marshal(encodetestInstance)
 	}
 }
 
 func BenchmarkEncodingNested(b *testing.B) {
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_, _ = Marshal(nestedInstance)
+	}
+}
+
+func BenchmarkDecoding(b *testing.B) {
+	bytes, _ := Marshal(encodetestInstance)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var i interface{}
+		_ = Unmarshal(bytes, &i)
+	}
+}
+
+func BenchmarkDecodingNested(b *testing.B) {
+	bytes, _ := Marshal(nestedInstance)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var i interface{}
+		_ = Unmarshal(bytes, &i)
 	}
 }
